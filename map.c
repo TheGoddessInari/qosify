@@ -148,16 +148,12 @@ static void qosify_map_clear_list(enum qosify_map_id id)
 
 static void __qosify_map_set_dscp_default(enum qosify_map_id id, uint8_t val)
 {
-	struct qosify_map_data data = {
-		.id = id,
-	};
 	struct qosify_class class = {
 		.val.ingress = val,
 		.val.egress = val,
 	};
 	uint32_t key;
 	int fd;
-	int i;
 
 	if (!(val & QOSIFY_DSCP_CLASS_FLAG)) {
 		if (id == CL_MAP_TCP_PORTS)
@@ -175,14 +171,14 @@ static void __qosify_map_set_dscp_default(enum qosify_map_id id, uint8_t val)
 		val = key | QOSIFY_DSCP_CLASS_FLAG;
 	}
 
-	fd = qosify_map_fds[id];
-	for (i = 0; i < (1 << 16); i++) {
-		data.addr.port = htons(i);
-		if (avl_find(&map_data, &data))
-			continue;
+	if (id == CL_MAP_TCP_PORTS)
+		config.dscp_default_tcp = val;
+	else if (id == CL_MAP_UDP_PORTS)
+		config.dscp_default_udp = val;
+	else
+		return;
 
-		bpf_map_update_elem(fd, &data.addr, &val, BPF_ANY);
-	}
+	qosify_map_update_config();
 }
 
 void qosify_map_set_dscp_default(enum qosify_map_id id, uint8_t val)
@@ -333,7 +329,13 @@ void __qosify_map_set_entry(struct qosify_map_data *data)
 			.seen = 1,
 		};
 
-		bpf_map_update_elem(fd, &data->addr, &val, BPF_ANY);
+		if (data->id == CL_MAP_TCP_PORTS || data->id == CL_MAP_UDP_PORTS) {
+			uint8_t dscp = val.dscp + 1;
+
+			bpf_map_update_elem(fd, &data->addr, &dscp, BPF_ANY);
+		} else {
+			bpf_map_update_elem(fd, &data->addr, &val, BPF_ANY);
+		}
 	}
 
 	if (data->id == CL_MAP_DNS)
@@ -630,12 +632,13 @@ void qosify_map_clear_files(void)
 void qosify_map_reset_config(void)
 {
 	qosify_map_clear_files();
+	memset(&config, 0, sizeof(config));
+
 	qosify_map_set_dscp_default(CL_MAP_TCP_PORTS, 0);
 	qosify_map_set_dscp_default(CL_MAP_UDP_PORTS, 0);
 	qosify_map_timeout = 3600;
 	qosify_active_timeout = 300;
 
-	memset(&config, 0, sizeof(config));
 	flow_config.dscp_prio = 0xff;
 	flow_config.dscp_bulk = 0xff;
 	config.dscp_icmp = 0xff;
@@ -661,8 +664,13 @@ static void qosify_map_free_entry(struct qosify_map_entry *e)
 	int fd = qosify_map_fds[e->data.id];
 
 	avl_delete(&map_data, &e->avl);
-	if (e->data.id < CL_MAP_DNS)
+	if (e->data.id == CL_MAP_TCP_PORTS || e->data.id == CL_MAP_UDP_PORTS) {
+		uint8_t dscp = 0;
+
+		bpf_map_update_elem(fd, &e->data.addr, &dscp, BPF_ANY);
+	} else if (e->data.id < CL_MAP_DNS) {
 		bpf_map_delete_elem(fd, &e->data.addr);
+	}
 	free(e);
 }
 

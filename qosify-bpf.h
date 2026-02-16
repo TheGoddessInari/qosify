@@ -43,6 +43,8 @@ struct qosify_flow_config {
 
 struct qosify_config {
 	uint8_t dscp_icmp;
+	uint8_t dscp_default_tcp;
+	uint8_t dscp_default_udp;
 };
 
 struct qosify_ip_map_val {
