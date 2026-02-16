@@ -967,26 +967,22 @@ int qosify_map_stats(struct blob_buf *b, bool reset)
 	return 0;
 }
 
-static int32_t
+static int
 qosify_map_get_class_id(const char *name)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(map_class); i++)
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++)
 		if (map_class[i] && !strcmp(map_class[i]->name, name))
 			return i;
 
-	for (i = 0; i < ARRAY_SIZE(map_class); i++)
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++)
 		if (!map_class[i])
 			return i;
 
-	for (i = 0; i < ARRAY_SIZE(map_class); i++) {
-		if (!(map_class[i]->data.flags & QOSIFY_CLASS_FLAG_PRESENT)) {
-			free(map_class[i]);
-			map_class[i] = NULL;
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++)
+		if (!(map_class[i]->data.flags & QOSIFY_CLASS_FLAG_PRESENT))
 			return i;
-		}
-	}
 
 	return -1;
 }
@@ -1063,7 +1059,7 @@ qosify_map_create_class(struct blob_attr *attr)
 	struct blob_attr *tb[__MAP_CLASS_MAX];
 	const char *name;
 	char *name_buf;
-	int32_t slot;
+	int slot;
 
 	blobmsg_parse(policy, __MAP_CLASS_MAX, tb,
 		      blobmsg_data(attr), blobmsg_len(attr));
@@ -1077,10 +1073,23 @@ qosify_map_create_class(struct blob_attr *attr)
 		return -1;
 
 	class = map_class[slot];
-	if (!class) {
-		class = calloc_a(sizeof(*class), &name_buf, strlen(name) + 1);
-		class->name = strcpy(name_buf, name);
-		map_class[slot] = class;
+	if (class && !strcmp(class->name, name)) {
+		/* found existing class by name */
+	} else {
+		/* need to allocate new class (either empty slot or eviction) */
+		struct qosify_map_class *new_class;
+
+		new_class = calloc_a(sizeof(*new_class), &name_buf, strlen(name) + 1);
+		if (!new_class) {
+			fprintf(stderr, "Failed to allocate memory for class '%s'\n", name);
+			return -1;
+		}
+		new_class->name = strcpy(name_buf, name);
+
+		if (class)
+			free(class);
+
+		class = map_class[slot] = new_class;
 	}
 
 	class->data.flags |= QOSIFY_CLASS_FLAG_PRESENT;
