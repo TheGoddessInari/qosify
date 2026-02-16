@@ -618,11 +618,9 @@ __qosify_map_load_file_data(FILE *f)
 	char *cur;
 
 	while (fgets(line, sizeof(line), f)) {
-		cur = strchr(line, '#');
-		if (cur)
-			*cur = 0;
+		cur = strchrnul(line, '#');
+		*cur = 0;
 
-		cur = line + strlen(line);
 		if (cur == line)
 			continue;
 
