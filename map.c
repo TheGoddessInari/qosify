@@ -156,6 +156,12 @@ static void qosify_map_clear_list(enum qosify_map_id id)
 static struct qosify_class *qosify_cpu_buf;
 static int qosify_cpu_buf_ncpus;
 
+/*
+ * Returns a pointer to a cached buffer large enough to hold data for all
+ * possible CPUs. This function assumes a single-threaded execution model
+ * (consistent with uloop), as it uses static and global variables without
+ * locking for efficiency.
+ */
 static struct qosify_class *
 qosify_get_cpu_buf(int *ncpus_ret)
 {
