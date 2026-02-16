@@ -90,11 +90,11 @@ void qosify_map_reload(void);
 void qosify_map_clear_files(void);
 void qosify_map_gc(void);
 void qosify_map_dump(struct blob_buf *b);
-void qosify_map_stats(struct blob_buf *b, bool reset);
+int qosify_map_stats(struct blob_buf *b, bool reset);
 void qosify_map_set_dscp_default(enum qosify_map_id id, uint8_t val);
 void qosify_map_reset_config(void);
 void qosify_map_update_config(void);
-void qosify_map_set_classes(struct blob_attr *val);
+int qosify_map_set_classes(struct blob_attr *val);
 int qosify_map_lookup_dns_entry(char *host, bool cname, uint8_t *dscp, uint32_t *seq);
 int qosify_map_add_dns_host(char *host, const char *addr, const char *type, int ttl);
 int map_parse_flow_config(struct qosify_flow_config *cfg, struct blob_attr *attr,

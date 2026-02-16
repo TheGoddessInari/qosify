@@ -168,8 +168,10 @@ qosify_ubus_config(struct ubus_context *ctx, struct ubus_object *obj,
 	if (reset)
 		qosify_map_reset_config();
 
-	if ((cur = tb[CL_CONFIG_CLASSES]) != NULL || reset)
-		qosify_map_set_classes(cur);
+	if ((cur = tb[CL_CONFIG_CLASSES]) != NULL || reset) {
+		if (qosify_map_set_classes(cur))
+			return UBUS_STATUS_UNKNOWN_ERROR;
+	}
 
 	if ((cur = tb[CL_CONFIG_TIMEOUT]) != NULL)
 		qosify_map_timeout = blobmsg_get_u32(cur);
@@ -241,7 +243,10 @@ qosify_ubus_get_stats(struct ubus_context *ctx, struct ubus_object *obj,
 	reset = tb && blobmsg_get_u8(tb);
 
 	blob_buf_init(&b, 0);
-	qosify_map_stats(&b, reset);
+	if (qosify_map_stats(&b, reset)) {
+		blob_buf_free(&b);
+		return UBUS_STATUS_UNKNOWN_ERROR;
+	}
 	ubus_send_reply(ctx, req, b.head);
 	blob_buf_free(&b);
 
