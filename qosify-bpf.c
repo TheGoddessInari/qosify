@@ -423,8 +423,8 @@ int classify(struct __sk_buff *skb)
 	if (module_flags & QOSIFY_IP_ONLY) {
 		type = info.proto = skb->protocol;
 	} else if (skb_parse_ethernet(&info)) {
-		skb_parse_vlan(&info);
-		skb_parse_vlan(&info);
+		if (skb_parse_vlan(&info))
+			skb_parse_vlan(&info);
 		type = info.proto;
 	} else {
 		return TC_ACT_UNSPEC;
