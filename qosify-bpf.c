@@ -208,6 +208,9 @@ parse_l4proto(struct qosify_config *config, struct skb_parser_info *info,
 	else
 		key = dest;
 
+	/* Port maps use 0 as an indicator to fallback to the default DSCP.
+	 * Any other value is treated as (DSCP + 1).
+	 */
 	if (proto == IPPROTO_TCP) {
 		value = bpf_map_lookup_elem(&tcp_ports, &key);
 		if (value && *value)

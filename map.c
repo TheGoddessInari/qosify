@@ -329,6 +329,10 @@ void __qosify_map_set_entry(struct qosify_map_data *data)
 			.seen = 1,
 		};
 
+		/*
+		 * For port maps, we use 0 as a special value to indicate "unset"
+		 * (use default from config). Therefore, we store dscp + 1.
+		 */
 		if (data->id == CL_MAP_TCP_PORTS || data->id == CL_MAP_UDP_PORTS) {
 			uint8_t dscp = val.dscp + 1;
 
