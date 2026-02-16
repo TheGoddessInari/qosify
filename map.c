@@ -41,6 +41,12 @@ struct qosify_map_file {
 struct qosify_map_class {
 	const char *name;
 	struct qosify_class data;
+
+	/*
+	 * Baseline for statistics reset. We use a subtraction-based reset
+	 * (total_packets - packets_base) instead of clearing per-CPU counters
+	 * in the BPF map to avoid race conditions and lost counts during traffic.
+	 */
 	uint64_t packets_base;
 };
 
@@ -147,6 +153,10 @@ static void qosify_map_clear_list(enum qosify_map_id id)
 		bpf_map_delete_elem(fd, &key);
 }
 
+/*
+ * Update a per-CPU map entry. To ensure consistent configuration across
+ * all CPU cores, we broadcast the same value to all per-CPU slots.
+ */
 static void qosify_bpf_map_update_class(int fd, uint32_t key, struct qosify_class *val,
 					struct qosify_class *buf, int ncpus)
 {
@@ -908,11 +918,17 @@ void qosify_map_dump(struct blob_buf *b)
 	blobmsg_close_array(b, a);
 }
 
+/*
+ * Collect statistics from the per-CPU class_map.
+ * Per-CPU maps are used to avoid cache line contention on the 'packets' counter
+ * during high-speed packet processing. Each CPU core increments its own local
+ * counter. Here we aggregate counters from all possible CPUs.
+ */
 int qosify_map_stats(struct blob_buf *b, bool reset)
 {
 	int ncpus = libbpf_num_possible_cpus();
 	struct qosify_class *data;
-	uint32_t i;
+	int i;
 
 	if (ncpus <= 0) {
 		fprintf(stderr, "Failed to get number of CPUs\n");
@@ -925,7 +941,7 @@ int qosify_map_stats(struct blob_buf *b, bool reset)
 		return -1;
 	}
 
-	for (i = 0; i < (uint32_t)ARRAY_SIZE(map_class); i++) {
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++) {
 		uint64_t packets = 0;
 		void *c;
 		int j;
@@ -1085,7 +1101,7 @@ int qosify_map_set_classes(struct blob_attr *val)
 	int fd = qosify_map_fds[CL_MAP_CLASS];
 	struct qosify_class empty_data = {};
 	struct blob_attr *cur;
-	int32_t i;
+	int i;
 	int rem;
 	int ncpus = libbpf_num_possible_cpus();
 	struct qosify_class *values = NULL;
@@ -1127,7 +1143,7 @@ int qosify_map_set_classes(struct blob_attr *val)
 		map_parse_flow_config(&map_class[i]->data.config, cur, true);
 	}
 
-	for (i = 0; i < (int32_t)ARRAY_SIZE(map_class); i++) {
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++) {
 		struct qosify_class *data;
 
 		if (map_class[i]) {
