@@ -41,6 +41,13 @@ struct qosify_map_file {
 struct qosify_map_class {
 	const char *name;
 	struct qosify_class data;
+
+	/*
+	 * Baseline for statistics reset. We use a subtraction-based reset
+	 * (total_packets - packets_base) instead of clearing per-CPU counters
+	 * in the BPF map to avoid race conditions and lost counts during traffic.
+	 */
+	uint64_t packets_base;
 };
 
 static const struct {
@@ -146,6 +153,63 @@ static void qosify_map_clear_list(enum qosify_map_id id)
 		bpf_map_delete_elem(fd, &key);
 }
 
+static struct qosify_class *qosify_cpu_buf;
+static int qosify_cpu_buf_ncpus;
+
+/*
+ * Returns a pointer to a cached buffer large enough to hold data for all
+ * possible CPUs. This function assumes a single-threaded execution model
+ * (consistent with uloop), as it uses static and global variables without
+ * locking for efficiency.
+ */
+static struct qosify_class *
+qosify_get_cpu_buf(int *ncpus_ret)
+{
+	static int ncpus = 0;
+
+	if (!ncpus) {
+		ncpus = libbpf_num_possible_cpus();
+		if (ncpus <= 0 || ncpus > 4096) {
+			fprintf(stderr, "Invalid number of CPUs: %d\n", ncpus);
+			ncpus = -1;
+		}
+	}
+
+	if (ncpus <= 0)
+		return NULL;
+
+	if (ncpus > qosify_cpu_buf_ncpus) {
+		struct qosify_class *new_buf;
+
+		new_buf = realloc(qosify_cpu_buf, ncpus * sizeof(struct qosify_class));
+		if (!new_buf) {
+			fprintf(stderr, "Failed to allocate memory for %d CPUs\n", ncpus);
+			return NULL;
+		}
+
+		qosify_cpu_buf = new_buf;
+		qosify_cpu_buf_ncpus = ncpus;
+	}
+
+	*ncpus_ret = ncpus;
+	return qosify_cpu_buf;
+}
+
+/*
+ * Update a per-CPU map entry. To ensure consistent configuration across
+ * all CPU cores, we broadcast the same value to all per-CPU slots.
+ */
+static void qosify_bpf_map_update_class(int fd, uint32_t key, struct qosify_class *val,
+					struct qosify_class *buf, int ncpus)
+{
+	int i;
+
+	for (i = 0; i < ncpus; i++)
+		buf[i] = *val;
+
+	bpf_map_update_elem(fd, &key, buf, BPF_ANY);
+}
+
 static void __qosify_map_set_dscp_default(enum qosify_map_id id, uint8_t val)
 {
 	struct qosify_map_data data = {
@@ -170,7 +234,12 @@ static void __qosify_map_set_dscp_default(enum qosify_map_id id, uint8_t val)
 		fd = qosify_map_fds[CL_MAP_CLASS];
 
 		memcpy(&class.config, &flow_config, sizeof(class.config));
-		bpf_map_update_elem(fd, &key, &class, BPF_ANY);
+		struct qosify_class *values;
+		int ncpus;
+
+		values = qosify_get_cpu_buf(&ncpus);
+		if (values)
+			qosify_bpf_map_update_class(fd, key, &class, values, ncpus);
 
 		val = key | QOSIFY_DSCP_CLASS_FLAG;
 	}
@@ -883,52 +952,67 @@ void qosify_map_dump(struct blob_buf *b)
 	blobmsg_close_array(b, a);
 }
 
-void qosify_map_stats(struct blob_buf *b, bool reset)
+/*
+ * Collect statistics from the per-CPU class_map.
+ * Per-CPU maps are used to avoid cache line contention on the 'packets' counter
+ * during high-speed packet processing. Each CPU core increments its own local
+ * counter. Here we aggregate counters from all possible CPUs.
+ */
+int qosify_map_stats(struct blob_buf *b, bool reset)
 {
-	struct qosify_class data;
-	uint32_t i;
+	struct qosify_class *data;
+	int ncpus;
+	int i;
 
-	for (i = 0; i < ARRAY_SIZE(map_class); i++) {
+	data = qosify_get_cpu_buf(&ncpus);
+	if (!data)
+		return -1;
+
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++) {
+		uint64_t packets = 0;
 		void *c;
+		int j;
 
 		if (!map_class[i])
 			continue;
 
-		if (bpf_map_lookup_elem(qosify_map_fds[CL_MAP_CLASS], &i, &data) < 0)
+		if (bpf_map_lookup_elem(qosify_map_fds[CL_MAP_CLASS], &i, data) < 0)
 			continue;
+
+		for (j = 0; j < ncpus; j++)
+			packets += data[j].packets;
 
 		c = blobmsg_open_table(b, map_class[i]->name);
-		blobmsg_add_u64(b, "packets", data.packets);
+		/*
+		 * Using unsigned subtraction here correctly handles counter wrap-around
+		 * as long as the delta is less than 2^64.
+		 */
+		blobmsg_add_u64(b, "packets", packets - map_class[i]->packets_base);
 		blobmsg_close_table(b, c);
 
-		if (!reset)
-			continue;
-
-		data.packets = 0;
-		bpf_map_update_elem(qosify_map_fds[CL_MAP_CLASS], &i, &data, BPF_ANY);
+		if (reset)
+			map_class[i]->packets_base = packets;
 	}
+
+	return 0;
 }
 
-static int32_t
+static int
 qosify_map_get_class_id(const char *name)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(map_class); i++)
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++)
 		if (map_class[i] && !strcmp(map_class[i]->name, name))
 			return i;
 
-	for (i = 0; i < ARRAY_SIZE(map_class); i++)
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++)
 		if (!map_class[i])
 			return i;
 
-	for (i = 0; i < ARRAY_SIZE(map_class); i++) {
-		if (!(map_class[i]->data.flags & QOSIFY_CLASS_FLAG_PRESENT)) {
-			free(map_class[i]);
-			map_class[i] = NULL;
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++)
+		if (!(map_class[i]->data.flags & QOSIFY_CLASS_FLAG_PRESENT))
 			return i;
-		}
-	}
 
 	return -1;
 }
@@ -1005,7 +1089,7 @@ qosify_map_create_class(struct blob_attr *attr)
 	struct blob_attr *tb[__MAP_CLASS_MAX];
 	const char *name;
 	char *name_buf;
-	int32_t slot;
+	int slot;
 
 	blobmsg_parse(policy, __MAP_CLASS_MAX, tb,
 		      blobmsg_data(attr), blobmsg_len(attr));
@@ -1019,10 +1103,23 @@ qosify_map_create_class(struct blob_attr *attr)
 		return -1;
 
 	class = map_class[slot];
-	if (!class) {
-		class = calloc_a(sizeof(*class), &name_buf, strlen(name) + 1);
-		class->name = strcpy(name_buf, name);
-		map_class[slot] = class;
+	if (class && !strcmp(class->name, name)) {
+		/* found existing class by name */
+	} else {
+		/* need to allocate new class (either empty slot or eviction) */
+		struct qosify_map_class *new_class;
+
+		new_class = calloc_a(sizeof(*new_class), &name_buf, strlen(name) + 1);
+		if (!new_class) {
+			fprintf(stderr, "Failed to allocate memory for class '%s'\n", name);
+			return -1;
+		}
+		new_class->name = strcpy(name_buf, name);
+
+		if (class)
+			free(class);
+
+		class = map_class[slot] = new_class;
 	}
 
 	class->data.flags |= QOSIFY_CLASS_FLAG_PRESENT;
@@ -1038,22 +1135,30 @@ qosify_map_create_class(struct blob_attr *attr)
 	return 0;
 }
 
-void qosify_map_set_classes(struct blob_attr *val)
+int qosify_map_set_classes(struct blob_attr *val)
 {
 	int fd = qosify_map_fds[CL_MAP_CLASS];
 	struct qosify_class empty_data = {};
 	struct blob_attr *cur;
-	int32_t i;
+	struct qosify_class *values;
+	int ncpus;
+	int i;
 	int rem;
 
-	for (i = 0; i < ARRAY_SIZE(map_class); i++)
+	values = qosify_get_cpu_buf(&ncpus);
+	if (!values)
+		return -1;
+
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++)
 		if (map_class[i])
 			map_class[i]->data.flags &= ~QOSIFY_CLASS_FLAG_PRESENT;
 
-	blobmsg_for_each_attr(cur, val, rem)
-		qosify_map_create_class(cur);
+	if (val) {
+		blobmsg_for_each_attr(cur, val, rem)
+			qosify_map_create_class(cur);
+	}
 
-	for (i = 0; i < ARRAY_SIZE(map_class); i++) {
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++) {
 		if (map_class[i] &&
 		    (map_class[i]->data.flags & QOSIFY_CLASS_FLAG_PRESENT))
 			continue;
@@ -1070,12 +1175,19 @@ void qosify_map_set_classes(struct blob_attr *val)
 		map_parse_flow_config(&map_class[i]->data.config, cur, true);
 	}
 
-	for (i = 0; i < ARRAY_SIZE(map_class); i++) {
+	for (i = 0; i < (int)ARRAY_SIZE(map_class); i++) {
 		struct qosify_class *data;
 
-		data = map_class[i] ? &map_class[i]->data : &empty_data;
-		bpf_map_update_elem(fd, &i, data, BPF_ANY);
+		if (map_class[i]) {
+			data = &map_class[i]->data;
+			map_class[i]->packets_base = 0;
+		} else {
+			data = &empty_data;
+		}
+		qosify_bpf_map_update_class(fd, i, data, values, ncpus);
 	}
+
+	return 0;
 }
 
 void qosify_map_update_config(void)

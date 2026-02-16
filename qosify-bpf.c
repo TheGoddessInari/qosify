@@ -88,7 +88,7 @@ struct {
 } ipv6_map SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__uint(pinning, 1);
 	__type(key, __u32);
 	__type(value, struct qosify_class);

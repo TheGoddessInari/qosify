@@ -58,6 +58,6 @@ struct qosify_class {
 	uint8_t flags;
 
 	uint64_t packets;
-};
+} __attribute__((aligned(8)));
 
 #endif
