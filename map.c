@@ -20,10 +20,12 @@
 struct qosify_map_class;
 
 static int qosify_map_entry_cmp(const void *k1, const void *k2, void *ptr);
+static void qosify_map_free_entry(struct qosify_map_entry *e);
 
 static int qosify_map_fds[__CL_MAP_MAX];
 static AVL_TREE(map_data, qosify_map_entry_cmp, false, NULL);
 static LIST_HEAD(map_files);
+static LIST_HEAD(timeout_list);
 static struct qosify_map_class *map_class[QOSIFY_MAX_CLASS_ENTRIES];
 static uint32_t next_timeout;
 static uint8_t qosify_dscp_default[2] = { 0xff, 0xff };
@@ -266,12 +268,14 @@ __qosify_map_alloc_entry(struct qosify_map_data *data)
 
 	if (data->id < CL_MAP_DNS) {
 		e = calloc(1, sizeof(*e));
+		INIT_LIST_HEAD(&e->timeout_list);
 		memcpy(&e->data.addr, &data->addr, sizeof(e->data.addr));
 
 		return e;
 	}
 
 	e = calloc_a(sizeof(*e), &pattern, strlen(data->addr.dns.pattern) + 1);
+	INIT_LIST_HEAD(&e->timeout_list);
 	strcpy(pattern, data->addr.dns.pattern);
 	e->data.addr.dns.pattern = pattern;
 
@@ -341,14 +345,23 @@ void __qosify_map_set_entry(struct qosify_map_data *data)
 
 	if (add) {
 		if (qosify_map_timeout == ~0 || file) {
+			if (!list_empty(&e->timeout_list))
+				list_del_init(&e->timeout_list);
 			e->timeout = ~0;
 			return;
 		}
 
 		e->timeout = qosify_gettime() + qosify_map_timeout;
+		if (!list_empty(&e->timeout_list))
+			list_del(&e->timeout_list);
+		list_add_tail(&e->timeout_list, &timeout_list);
+
 		delta = e->timeout - next_timeout;
 		if (next_timeout && delta >= 0)
 			return;
+	} else if (!e->data.file && !e->data.user) {
+		qosify_map_free_entry(e);
+		return;
 	}
 
 	uloop_timeout_set(&qosify_map_timer, 1);
@@ -644,11 +657,18 @@ void qosify_map_reset_config(void)
 void qosify_map_reload(void)
 {
 	struct qosify_map_file *f;
+	struct qosify_map_entry *e, *tmp;
 
 	qosify_map_reset_file_entries();
 
 	list_for_each_entry(f, &map_files, list)
 		__qosify_map_load_file(f->filename);
+
+	avl_for_each_element_safe(&map_data, e, avl, tmp) {
+		if (e->data.file || e->data.user)
+			continue;
+		qosify_map_free_entry(e);
+	}
 
 	qosify_map_gc();
 
@@ -659,6 +679,9 @@ void qosify_map_reload(void)
 static void qosify_map_free_entry(struct qosify_map_entry *e)
 {
 	int fd = qosify_map_fds[e->data.id];
+
+	if (!list_empty(&e->timeout_list))
+		list_del(&e->timeout_list);
 
 	avl_delete(&map_data, &e->avl);
 	if (e->data.id < CL_MAP_DNS)
@@ -696,27 +719,29 @@ void qosify_map_gc(void)
 	uint32_t cur_time = qosify_gettime();
 
 	next_timeout = 0;
-	avl_for_each_element_safe(&map_data, e, avl, tmp) {
+	list_for_each_entry_safe(e, tmp, &timeout_list, timeout_list) {
 		int32_t cur_timeout;
 
-		if (e->data.user && e->timeout != ~0) {
+		cur_timeout = e->timeout - cur_time;
+		if (cur_timeout <= 0 &&
+		    qosify_map_entry_refresh_timeout(e)) {
 			cur_timeout = e->timeout - cur_time;
-			if (cur_timeout <= 0 &&
-			    qosify_map_entry_refresh_timeout(e))
-				cur_timeout = e->timeout - cur_time;
-			if (cur_timeout <= 0) {
-				e->data.user = false;
-				e->data.dscp = e->data.file_dscp;
-			} else if (!timeout || cur_timeout < timeout) {
-				timeout = cur_timeout;
-				next_timeout = e->timeout;
-			}
+			/* refresh timeout: move to end of list */
+			list_move_tail(&e->timeout_list, &timeout_list);
 		}
 
-		if (e->data.file || e->data.user)
-			continue;
-
-		qosify_map_free_entry(e);
+		if (cur_timeout <= 0) {
+			e->data.user = false;
+			e->data.dscp = e->data.file_dscp;
+			list_del_init(&e->timeout_list);
+			if (!e->data.file) {
+				qosify_map_free_entry(e);
+				continue;
+			}
+		} else if (!timeout || cur_timeout < timeout) {
+			timeout = cur_timeout;
+			next_timeout = e->timeout;
+		}
 	}
 
 	if (!timeout)

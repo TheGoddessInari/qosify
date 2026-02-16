@@ -63,6 +63,7 @@ struct qosify_map_data {
 
 struct qosify_map_entry {
 	struct avl_node avl;
+	struct list_head timeout_list;
 
 	uint32_t timeout;
 
