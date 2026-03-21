@@ -43,6 +43,9 @@ struct qosify_flow_config {
 
 struct qosify_config {
 	uint8_t dscp_icmp;
+	/* Default DSCP for TCP/UDP if port map entry is 0 */
+	uint8_t dscp_default_tcp;
+	uint8_t dscp_default_udp;
 };
 
 struct qosify_ip_map_val {
