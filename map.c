@@ -93,6 +93,32 @@ static const struct {
 	{ "DF", 0 },
 };
 
+static const char *dscp_names[64] = {
+	[0] = "CS0",
+	[8] = "CS1",
+	[16] = "CS2",
+	[24] = "CS3",
+	[32] = "CS4",
+	[40] = "CS5",
+	[48] = "CS6",
+	[56] = "CS7",
+	[10] = "AF11",
+	[12] = "AF12",
+	[14] = "AF13",
+	[18] = "AF21",
+	[20] = "AF22",
+	[22] = "AF23",
+	[26] = "AF31",
+	[28] = "AF32",
+	[30] = "AF33",
+	[34] = "AF41",
+	[36] = "AF42",
+	[38] = "AF43",
+	[46] = "EF",
+	[44] = "VA",
+	[1] = "LE",
+};
+
 static void qosify_map_timer_cb(struct uloop_timeout *t)
 {
 	qosify_map_gc();
@@ -558,19 +584,18 @@ int qosify_map_dscp_value(const char *val, uint8_t *dscp_val)
 static void
 qosify_map_dscp_codepoint_str(char *dest, int len, uint8_t dscp)
 {
-	int i;
-
 	if (dscp & QOSIFY_DSCP_FALLBACK_FLAG) {
-		*(dest++) = '+';
-		len--;
+		if (len > 0) {
+			*(dest++) = '+';
+			len--;
+		}
 		dscp &= ~QOSIFY_DSCP_FALLBACK_FLAG;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(codepoints); i++) {
-		if (codepoints[i].val != dscp)
-			continue;
-
-		snprintf(dest, len, "%s", codepoints[i].name);
+	if (dscp < 64 && dscp_names[dscp]) {
+		strncpy(dest, dscp_names[dscp], len);
+		if (len > 0)
+			dest[len - 1] = 0;
 		return;
 	}
 
